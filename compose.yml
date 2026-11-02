@@ -1,0 +1,119 @@
+name: blakecoin-lab
+
+services:
+  node:
+    image: 1maa/blakecoin:latest@sha256:fe2171dab038a150f07fe245a8db3c97566dc01c103dcb9de7f522f47cb14220
+    command: >
+      -chain=signet
+      -listenonion=0
+      -signetchallenge=5120f313278de4d562561245e17fb3d0d71b697923f3c27e39e44b108622fd0c56f2
+
+      -rpcallowip=0.0.0.0/0
+      -rpcbind=0.0.0.0
+      -rpccookiefile=/var/tmp/.cookie
+      -rpccookieperms=all
+
+      -blockfilterindex=basic
+      -coinstatsindex=1
+      -txindex=1
+
+      -peerblockfilters=1
+      -peerbloomfilters=1
+
+      -blockmintxfee=0.0
+      -minrelaytxfee=0.0
+      -mintxfee=0.0
+
+      -addresstype=bech32m
+      -walletimplicitsegwit=1
+
+      -zmqpubsequence=tcp://0.0.0.0:28336
+    healthcheck:
+      test: test -f /var/tmp/.cookie
+      start_interval: 125ms
+      start_period: 500ms
+    restart: unless-stopped
+    volumes:
+      - ./bitcoin.conf:/home/blakecoin/.bitcoin/bitcoin.conf
+      - cookie_dir:/var/tmp
+      - node_data:/home/blakecoin/.bitcoin
+
+  wallet-setup:
+    image: 1maa/blakecoin:latest@sha256:fe2171dab038a150f07fe245a8db3c97566dc01c103dcb9de7f522f47cb14220
+    depends_on:
+      node:
+        condition: service_healthy
+    environment:
+      - WALLET_NAME=XBT
+      - RECV_XPRV=tr(tprv8ZgxMBicQKsPdksbPS6u4aLDgjkt5LWM3vDscWSQKCTPsgKiekL3XiTb5HUHgyyr6e3pTn4JUcZUnPdAbbp3qtUmwmvAYwJHrJQiPMBMpum/86h/1h/0h/0/*)#ale2lp6q
+      - CHNG_XPRV=tr(tprv8ZgxMBicQKsPdksbPS6u4aLDgjkt5LWM3vDscWSQKCTPsgKiekL3XiTb5HUHgyyr6e3pTn4JUcZUnPdAbbp3qtUmwmvAYwJHrJQiPMBMpum/86h/1h/0h/1/*)#vtutz52c
+      - MINE_XPRV=tr(tprv8ZgxMBicQKsPdksbPS6u4aLDgjkt5LWM3vDscWSQKCTPsgKiekL3XiTb5HUHgyyr6e3pTn4JUcZUnPdAbbp3qtUmwmvAYwJHrJQiPMBMpum/86h/1h/0h/2/*)#k7ngvzne
+    entrypoint:
+      - sh
+      - -x
+      - -c
+      - |
+        bitcoin-cli -signet -rpccookiefile=/var/tmp/.cookie -rpcconnect=node -named createwallet wallet_name=$${WALLET_NAME} blank=true avoid_reuse=true load_on_startup=true
+        bitcoin-cli -signet -rpccookiefile=/var/tmp/.cookie -rpcconnect=node importdescriptors '[{"desc":"'$${RECV_XPRV}'","range":999,"timestamp":"now","active":true,"internal":false}]'
+        bitcoin-cli -signet -rpccookiefile=/var/tmp/.cookie -rpcconnect=node importdescriptors '[{"desc":"'$${CHNG_XPRV}'","range":999,"timestamp":"now","active":true,"internal":true}]'
+        bitcoin-cli -signet -rpccookiefile=/var/tmp/.cookie -rpcconnect=node importdescriptors '[{"desc":"'$${MINE_XPRV}'","range":999,"timestamp":"now","active":false,"internal":true}]'
+    restart: no
+    volumes:
+      - cookie_dir:/var/tmp
+
+  miner:
+    image: 1maa/blakecoin:signet-miner@sha256:e2d8691bfb9ad62883e5dc2e35864100ac4c4f19fedc75bdba9909b4ac4a1e50
+    depends_on:
+      wallet-setup:
+        condition: service_completed_successfully
+    environment:
+      - CLI_CMD_ARGS=-rpccookiefile=/var/tmp/.cookie -rpcconnect=node
+      - MINING_XPUB=tr(tpubDCZH8j9YS7HgDkiyC3cXbCKLCLk5j7mN6aTShpB3pF7bs9EXuctzTMD76UQDemvi9PZRYEnPHH8exJhFwR7pBVkxYwUquNWCk9DZk9qyshZ/2/*)#5eqky29x
+    restart: unless-stopped
+    volumes:
+      - cookie_dir:/var/tmp
+
+  valkey:
+    image: valkey/valkey:9-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
+    environment:
+      - VALKEY_EXTRA_FLAGS=--unixsocket /run/valkey/valkey.sock --unixsocketperm 660
+    healthcheck:
+      test: valkey-cli ping > /dev/null
+      start_interval: 125ms
+      start_period: 500ms
+    restart: unless-stopped
+    volumes:
+      - valkey_data:/data
+      - valkey_socket:/run/valkey
+
+  faucet:
+    image: 1maa/bbo-faucet:latest@sha256:f99003b123d7957f78d4b3050ee585030a524e13b778087d1cacfe1c3f549cd8
+    depends_on:
+      node:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    environment:
+      - FAUCET_REDIS_ENDPOINT=valkey:6379
+      - FAUCET_BITCOIN_RPC_ENDPOINT=http://node:38332
+      - FAUCET_BITCOIN_RPC_COOKIE=/var/tmp/.cookie
+      - FAUCET_NAME=Blakecoin Lab
+      - FAUCET_MAX_ONE_TIME_BTC=50.0
+      - FAUCET_USER_SESSION_TTL=2
+      - FAUCET_GLOBAL_SESSION_TTL=2
+      - FAUCET_USER_SESSION_MAX_BTC=200.0
+      - FAUCET_GLOBAL_SESSION_MAX_BTC=5000.0
+      - FAUCET_MEMPOOL_URL=http://localhost:8080
+      - FAUCET_FEE_RATE=0.0
+    ports:
+      - "127.0.0.1:8123:8080"
+    restart: unless-stopped
+    stop_signal: SIGKILL
+    volumes:
+      - cookie_dir:/var/tmp
+
+volumes:
+  cookie_dir:
+  node_data:
+  valkey_data:
+  valkey_socket:
